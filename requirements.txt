@@ -1,0 +1,39 @@
+# Quantum
+qiskit>=2.0
+qiskit-aer>=0.15
+qiskit-algorithms>=0.3
+qiskit-ibm-runtime>=0.20
+pennylane>=0.40
+
+# ML / DL
+torch>=2.0
+transformers>=4.40
+huggingface_hub>=0.20
+datasets>=2.18
+peft>=0.10
+scikit-learn>=1.4
+
+# Finance / Data
+yfinance>=0.2.40
+alpaca-py>=0.20
+polygon-api-client>=1.13
+cvxpy>=1.4
+pyportfolioopt>=1.5
+backtrader>=1.9
+
+# Foundation models
+chronos-forecasting>=1.2
+
+# Agentic / LLM
+langchain>=1.0
+langchain-openai>=0.1
+chromadb>=0.5
+
+# Core utils
+requests>=2.31
+numpy>=1.26
+pandas>=2.1
+matplotlib>=3.8
+seaborn>=0.13
+jupyter>=1.0
+notebook>=7.0
