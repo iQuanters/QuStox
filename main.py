@@ -1,4 +1,5 @@
 import argparse
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -9,6 +10,8 @@ def main():
     args = parser.parse_args()
     
     ticker = args.ticker.upper()
+    output_dir = os.path.join("dataset", ticker)
+    os.makedirs(output_dir, exist_ok=True)
     
     # ==========================================
     # LEVEL 1 & 2: Intraday (Max allowed is 60 days)
@@ -22,12 +25,12 @@ def main():
         return
         
     df_20m = df_5m.resample("20min").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    df_20m.to_csv(f"{ticker}_20min_local.csv")
+    df_20m.to_csv(os.path.join(output_dir, f"{ticker}_20min_local.csv"))
     
     # 2-Hour Data (Fetch 1h data, resample to 2h)
     df_1h = yf.download(ticker, period="60d", interval="1h", auto_adjust=True, prepost=True, multi_level_index=False)
     df_2h = df_1h.resample("2h").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    df_2h.to_csv(f"{ticker}_2hours_local.csv")
+    df_2h.to_csv(os.path.join(output_dir, f"{ticker}_2hours_local.csv"))
     
     # ==========================================
     # LEVEL 3: 2-Day Dataset (Full 5 Years allowed!)
@@ -53,9 +56,9 @@ def main():
     df_2d.index = df_1d.index[::2]
     
     # Save it locally
-    df_2d.to_csv(f"{ticker}_2days_local.csv")
+    df_2d.to_csv(os.path.join(output_dir, f"{ticker}_2days_local.csv"))
     
-    print(f"\nAll datasets for {ticker} processed and saved locally!")
+    print(f"\nAll datasets for {ticker} processed and saved in {output_dir}!")
 
 if __name__ == "__main__":
     main()
