@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local data outputs
+*_local.csv
