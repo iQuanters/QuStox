@@ -1,45 +1,22 @@
 """
-Classical baseline models for honest benchmarking against HQRC.
-Each exposes the same .fit(X, y) / .predict(X) interface.
+Classical baselines for honest comparison against the quantum reservoir.
+
+  * ClassicalSVR : the SAME SVR readout, but trained on the raw window of past
+                   returns instead of the quantum features. Isolates whatever
+                   the quantum reservoir adds on top of the identical input.
+  * naive_persistence : predict next return = last return (a momentum null model).
 """
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
+
+from .readout import SVRReadout
 
 
-def logistic_regression(C: float = 1.0) -> Pipeline:
-    return Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", LogisticRegression(C=C, max_iter=1000, solver="lbfgs")),
-    ])
+class ClassicalSVR(SVRReadout):
+    """Identical SVR, applied directly to the raw lag-window features."""
+    pass
 
 
-def random_forest(n_estimators: int = 200, max_depth: int = 5) -> RandomForestClassifier:
-    return RandomForestClassifier(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        random_state=42,
-        n_jobs=-1,
-    )
-
-
-def gradient_boosting(n_estimators: int = 100, max_depth: int = 3) -> Pipeline:
-    return Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", GradientBoostingClassifier(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            random_state=42,
-        )),
-    ])
-
-
-def get_all_baselines() -> dict:
-    return {
-        "LogReg (classical)": logistic_regression(),
-        "RandomForest": random_forest(),
-        "GradBoost": gradient_boosting(),
-    }
+def naive_persistence(enc_window_test: np.ndarray) -> np.ndarray:
+    """Predict next return = most recent encoded return in the window."""
+    return enc_window_test[:, -1]

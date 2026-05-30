@@ -1,76 +1,48 @@
+"""
+Univariate series preparation — everything is derived from the closing price.
+
+  close   : raw closing price (kept for signal reconstruction & confidence)
+  ret     : simple return  r_t = close_t / close_{t-1} − 1   (target source)
+  enc     : tanh-bounded return fed into the quantum reservoir's angle encoding
+  target  : next-bar return  r_{t+1}   (what the SVR regresses on)
+"""
+
 import numpy as np
 import pandas as pd
 
-from .indicators import rsi, macd, bollinger_bands, atr
 
-# 4 features fed into the quantum reservoir (one per qubit)
-QUANTUM_FEATURE_COLS = ["rsi_norm", "macd_norm", "bb_pos", "ret_1_norm"]
-
-# All features available to every model
-ALL_FEATURE_COLS = [
-    "ret_1_norm", "ret_5_norm", "ret_20_norm",
-    "rsi_norm", "macd_norm", "bb_pos",
-    "atr_norm", "vol_ratio",
-    "hour_sin", "hour_cos",
-]
-
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_series(df: pd.DataFrame, return_norm: float = 0.02) -> pd.DataFrame:
+    """Build the univariate frame (close, ret, enc, target) from OHLCV data."""
     close = df["Close"].squeeze()
-    high  = df["High"].squeeze()
-    low   = df["Low"].squeeze()
-    vol   = df["Volume"].squeeze()
+    ret = close.pct_change()
+    enc = np.tanh(ret / return_norm)        # bounded → stable angle encoding
+    target = close.pct_change().shift(-1)   # next-bar return
 
-    f = pd.DataFrame(index=df.index)
-
-    # ── returns (tanh-scaled to keep outliers bounded) ──────────────────────
-    f["ret_1_norm"]  = np.tanh(close.pct_change(1)  / 0.02)
-    f["ret_5_norm"]  = np.tanh(close.pct_change(5)  / 0.05)
-    f["ret_20_norm"] = np.tanh(close.pct_change(20) / 0.10)
-
-    # ── RSI → [0, 1] ─────────────────────────────────────────────────────────
-    f["rsi_norm"] = rsi(close, 14) / 100.0
-
-    # ── MACD histogram → tanh-normalized ─────────────────────────────────────
-    _, _, hist = macd(close)
-    rolling_std = hist.rolling(50, min_periods=10).std().replace(0, np.nan).ffill()
-    f["macd_norm"] = np.tanh(hist / (rolling_std + 1e-12))
-
-    # ── Bollinger Band position → [-1, 1] ────────────────────────────────────
-    _, _, bp = bollinger_bands(close, 20)
-    f["bb_pos"] = (bp * 2 - 1).clip(-1, 1)
-
-    # ── ATR as fraction of price → tanh-scaled ──────────────────────────────
-    raw_atr = atr(high, low, close, 14) / (close + 1e-12)
-    f["atr_norm"] = np.tanh(raw_atr / raw_atr.rolling(50, min_periods=10).std().replace(0, np.nan).ffill())
-
-    # ── volume ratio vs 20-bar average → tanh-scaled ────────────────────────
-    vr = vol / (vol.rolling(20).mean() + 1e-12)
-    f["vol_ratio"] = np.tanh((vr - 1.0) / 0.5)
-
-    # ── intraday time encoding ───────────────────────────────────────────────
-    idx = df.index
-    if hasattr(idx, "hour"):
-        hour_float = idx.hour + idx.minute / 60
-    else:
-        hour_float = np.full(len(df), 12.0)  # daily bars: use midday as neutral
-    f["hour_sin"] = np.sin(2 * np.pi * np.asarray(hour_float) / 24)
-    f["hour_cos"] = np.cos(2 * np.pi * np.asarray(hour_float) / 24)
-
-    # ── next-bar direction label ─────────────────────────────────────────────
-    f["label"] = (close.shift(-1) > close).astype(int)
-
-    return f.dropna()
+    out = pd.DataFrame(
+        {"close": close, "ret": ret, "enc": enc, "target": target},
+        index=df.index,
+    )
+    return out.dropna()                      # drops first (no ret) & last (no target)
 
 
-def train_test_split_temporal(feat: pd.DataFrame, test_frac: float = 0.25):
-    """Strict time-based split — no data leakage."""
-    n = len(feat)
+def train_test_split_temporal(series: pd.DataFrame, test_frac: float = 0.25):
+    """Strict time-based split — no shuffling, no leakage."""
+    n = len(series)
     split = int(n * (1 - test_frac))
-    return feat.iloc[:split].copy(), feat.iloc[split:].copy()
+    return series.iloc[:split].copy(), series.iloc[split:].copy()
 
 
-def get_Xy(feat: pd.DataFrame, cols: list):
-    X = feat[cols].values.astype(np.float64)
-    y = feat["label"].values.astype(int)
-    return X, y
+def make_lag_windows(enc: np.ndarray, window: int) -> np.ndarray:
+    """
+    Classical baseline features: the raw window of the last `window` encoded
+    returns at each step (left-padded with zeros). This is exactly the
+    information the quantum reservoir is given, so the baseline is honest.
+    """
+    enc = np.asarray(enc, dtype=np.float64)
+    n = len(enc)
+    W = np.zeros((n, window), dtype=np.float64)
+    for t in range(n):
+        lo = max(0, t - window + 1)
+        seg = enc[lo : t + 1]
+        W[t, window - len(seg):] = seg
+    return W
