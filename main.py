@@ -11,7 +11,8 @@ def main():
     
     ticker = args.ticker.upper()
     output_dir = os.path.join("dataset", ticker)
-    os.makedirs(output_dir, exist_ok=True)
+    raw_dir = os.path.join(output_dir, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
     
     # ==========================================
     # LEVEL 1 & 2: Intraday (Max allowed is 60 days)
@@ -23,12 +24,18 @@ def main():
     if df_5m.empty:
         print(f"Error: No data found for ticker {ticker}. Please check the symbol and try again.")
         return
+    df_5m.to_csv(os.path.join(raw_dir, f"{ticker}_raw_5m.csv"))
         
     df_20m = df_5m.resample("20min").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
     df_20m.to_csv(os.path.join(output_dir, f"{ticker}_20min_local.csv"))
     
     # 2-Hour Data (Fetch 1h data, resample to 2h)
     df_1h = yf.download(ticker, period="60d", interval="1h", auto_adjust=True, prepost=True, multi_level_index=False)
+    if df_1h.empty:
+        print(f"Error: No hourly data found for ticker {ticker}.")
+        return
+    df_1h.to_csv(os.path.join(raw_dir, f"{ticker}_raw_1h.csv"))
+    
     df_2h = df_1h.resample("2h").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
     df_2h.to_csv(os.path.join(output_dir, f"{ticker}_2hours_local.csv"))
     
@@ -42,6 +49,7 @@ def main():
     if df_1d.empty:
         print(f"Error: No daily data found for ticker {ticker}.")
         return
+    df_1d.to_csv(os.path.join(raw_dir, f"{ticker}_raw_1d.csv"))
         
     # Step 2: Group by every 2 trading days using integer division on row indices.
     # This ensures that the Open of Day 1 and Close of Day 2 match perfectly for each pair of consecutive trading days,
