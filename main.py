@@ -40,12 +40,12 @@ def main():
     df_2h.to_csv(os.path.join(output_dir, f"{ticker}_2hours_local.csv"))
     
     # ==========================================
-    # LEVEL 3: 2-Day Dataset (Full 5 Years allowed!)
+    # LEVEL 3: 2-Day Dataset (Max history)
     # ==========================================
-    print(f"\nDownloading 5 years of daily data for {ticker} to build the 2-Day dataset...")
+    print(f"\nDownloading maximum historical daily data for {ticker} to build the 2-Day dataset...")
     
-    # Step 1: Download 5 years of standard 1-day data
-    df_1d = yf.download(ticker, period="5y", interval="1d", auto_adjust=True, multi_level_index=False)
+    # Step 1: Download max historical daily data
+    df_1d = yf.download(ticker, period="max", interval="1d", auto_adjust=True, multi_level_index=False)
     if df_1d.empty:
         print(f"Error: No daily data found for ticker {ticker}.")
         return
