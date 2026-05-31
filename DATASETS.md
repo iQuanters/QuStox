@@ -23,11 +23,23 @@ done
 ```
 
 ## 2. How to Add New Tickers
-To add new stock tickers, simply run the downloader script:
+To add new stock tickers locally, simply run the downloader script:
 ```bash
 uv run python main.py <TICKER>
 ```
 The script will download and save the data under `dataset/<TICKER>/`. Because `dataset/` is in `.gitignore`, new folders (like `dataset/TSLA/`) are automatically ignored and will not show up in `git status` or be pushed.
+
+### Force-Tracking a New Ticker on Git/GitHub
+If you want to intentionally track a new ticker and upload it to GitHub, you can bypass the `.gitignore` rule using the Git force option (`-f`):
+```bash
+# Stage the files by forcing Git to add them
+git add -f dataset/<TICKER>/
+
+# Commit and push as usual
+git commit -m "feat: add <TICKER> dataset to repository"
+git push origin master
+```
+Once added and committed, Git will track this new ticker normally.
 
 ## 3. How to Remove Tickers
 * **To delete local files:** Simply delete the folder, e.g., `rm -rf dataset/TSLA`.
