@@ -48,11 +48,11 @@ def main():
         
     # 10-Minute Data (resample from 5m)
     df_10m = df_5m.resample("10min").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    df_10m.to_csv(os.path.join(output_dir, f"{ticker}_10min_local.csv"))
+    df_10m.to_csv(os.path.join(raw_dir, f"{ticker}_10min_local.csv"))
     
     # 30-Minute Data (resample from 5m)
     df_30m = df_5m.resample("30min").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    df_30m.to_csv(os.path.join(output_dir, f"{ticker}_30min_local.csv"))
+    df_30m.to_csv(os.path.join(raw_dir, f"{ticker}_30min_local.csv"))
     
     # Download raw 1h data (no aggregation required, just keep the raw file)
     df_1h = get_data(period="60d", interval="1h", filename=f"{ticker}_raw_1h.csv", prepost=True)
@@ -72,9 +72,9 @@ def main():
         return
     
     # Save the 1d data directly as the local output
-    df_1d.to_csv(os.path.join(output_dir, f"{ticker}_1d_local.csv"))
+    df_1d.to_csv(os.path.join(raw_dir, f"{ticker}_1d_local.csv"))
     
-    print(f"\nAll datasets for {ticker} processed and saved in {output_dir}!")
+    print(f"\nAll datasets for {ticker} processed and saved in {raw_dir}!")
 
 if __name__ == "__main__":
     main()
