@@ -6,35 +6,36 @@ Quantum Reservoir Computer (16-qubit Ising, Qiskit) + 2-layer NN read-out [40,6,
 for SPY next-close prediction from a sliding window of closing prices.
 
 Everything needed to TRAIN and TEST lives in this one file:
-  * data loading (SPY closes from CSV, or yfinance download if absent)
+  * data loading from aapl_x / aapl_y (in-environment variables or .npy files)
   * sliding-window dataset:  x = W consecutive closes,  y = next close
   * 16-qubit random-Ising quantum reservoir with genuine temporal memory
   * NN read-out [40, 6, 1]  (sklearn MLP) + classical no-quantum baseline
   * long/short backtest metrics + buy/sell signal + 0-100 confidence
   * live progress messages (percent, elapsed, ETA) for the slow reservoir pass
 
-Dependencies: numpy, pandas, scikit-learn, qiskit, qiskit-aer  (yfinance optional).
+Dependencies: numpy, scikit-learn, qiskit, qiskit-aer.
 
-Usage
------
-  python hqrc_nn.py                      # full dataset, ideal simulator
-  python hqrc_nn.py --limit 600          # quick run on the last 600 bars
-  python hqrc_nn.py --classical          # add a no-quantum NN baseline
-  python hqrc_nn.py --noise --limit 400  # realistic-noise robustness check (slow)
-  python hqrc_nn.py --target level        # regress raw close instead of return
+How to run (no command line / no arguments needed)
+--------------------------------------------------
+Just execute this file. It loads the total dataset directly from the files
+`aapl_x.npy` and `aapl_y.npy` (in the run directory):
+
+  * aapl_x : (N, W) array — each row is W consecutive closing prices
+  * aapl_y : (N,)  array — the next closing price for each row
+
+then splits it (time-ordered) into train/test. All knobs live in the CONFIG
+block below — edit those values, then run.
 ================================================================================
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import time
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
@@ -53,8 +54,10 @@ from sklearn.compose import TransformedTargetRegressor
 # ----------------------------------------------------------------------- config
 HERE = Path(__file__).parent
 CACHE_DIR = HERE / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
-CSV_PATH = CACHE_DIR / "spy_1h_2y.csv"
+try:
+    CACHE_DIR.mkdir(exist_ok=True)
+except Exception:
+    pass  # read-only filesystem (some cloud platforms) — caching just gets skipped
 
 W_DEFAULT = 15            # sliding-window length
 RETURN_NORM = 0.02       # tanh scale for the reservoir's return encoding
@@ -62,6 +65,23 @@ BARS_PER_YEAR = 252 * 6  # hourly-bar Sharpe annualization
 
 # native gates the reservoir is simulated with (noise attaches to these)
 BASIS_GATES = ["rx", "ry", "rz", "rxx", "rzz"]
+
+# ============================================================ CONFIG (edit here)
+# No command line is used — change these values and run the file directly.
+# Dataset files (referenced directly by name, relative to the run directory):
+#   aapl_x.npy : (N, W) closing-price windows  [oldest … newest]
+#   aapl_y.npy : (N,)   next-close targets
+AAPL_X_FILE = "aapl_x.npy"
+AAPL_Y_FILE = "aapl_y.npy"
+
+SHOTS = 1000                 # measurement shots per window
+NOISE = False                # realistic noise (much slower — leave False unless testing)
+TEST_FRAC = 0.25             # fraction of the (time-ordered) data held out for testing
+TARGET = "return"            # "return" (predict next return, reconstruct close) or "level"
+RUN_CLASSICAL_BASELINE = True  # also train a no-quantum NN on the raw return windows
+BATCH_SIZE = 200             # circuits simulated per Aer batch
+USE_CACHE = True             # cache reservoir features to cache/ (instant re-runs)
+SEED = 42
 
 
 # ============================================================ realistic noise
@@ -225,9 +245,60 @@ class QuantumReservoir:
             print()  # newline after the progress line
 
         if use_cache:
-            np.save(cache_path, feats)
+            try:
+                np.save(cache_path, feats)
+                if verbose:
+                    print(f"[qrc] cached features → {cache_path.name}")
+            except Exception as e:
+                if verbose:
+                    print(f"[qrc] cache write skipped ({e})")
+        return feats
+
+    def transform_prebuilt(self, return_windows: np.ndarray,
+                           use_cache=True, batch_size=200, verbose=True) -> np.ndarray:
+        """Pre-built (N, W) return windows → (N, output_dim) feature matrix."""
+        return_windows = np.asarray(return_windows, dtype=np.float64)
+        cache_path = self._cache_key(return_windows.ravel())
+        if use_cache and cache_path.exists():
             if verbose:
-                print(f"[qrc] cached features → {cache_path.name}")
+                print(f"[qrc] loaded cached features ← {cache_path.name}")
+            return np.load(cache_path)
+
+        n = len(return_windows)
+        feats = np.zeros((n, self.output_dim), dtype=np.float64)
+        if verbose:
+            print(f"[qrc] simulating {n} prebuilt windows  "
+                  f"({self.n_qubits} qubits, window={self.window}, "
+                  f"shots={self.shots}, noise={'ON' if self.noise else 'OFF'})")
+        t0 = time.time()
+
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            circuits = [self.build_circuit(return_windows[t]) for t in range(start, end)]
+            tqc = transpile(circuits, self.sim, optimization_level=1)
+            result = self.sim.run(tqc, shots=self.shots).result()
+            for i in range(end - start):
+                feats[start + i] = self._counts_to_features(result.get_counts(i))
+
+            if verbose:
+                elapsed = time.time() - t0
+                rate = end / elapsed
+                eta = (n - end) / rate if rate > 0 else 0.0
+                bar = _progress_bar(end / n)
+                print(f"\r[qrc] {bar} {end:>5}/{n} ({end/n:5.1%}) | "
+                      f"{elapsed:6.1f}s elapsed | ETA {eta:6.1f}s | "
+                      f"{rate:5.1f} win/s", end="", flush=True)
+        if verbose:
+            print()
+
+        if use_cache:
+            try:
+                np.save(cache_path, feats)
+                if verbose:
+                    print(f"[qrc] cached features → {cache_path.name}")
+            except Exception as e:
+                if verbose:
+                    print(f"[qrc] cache write skipped ({e})")
         return feats
 
 
@@ -252,8 +323,28 @@ class NNReadout:
             transformer=StandardScaler(),
         )
 
-    def fit(self, X, y):
+    def fit(self, X, y, verbose=True):
         self.model.fit(X, y)
+        mlp = self.model.regressor_.named_steps["mlpregressor"]
+        curve = mlp.loss_curve_
+        n_iter = mlp.n_iter_
+        stopped_early = n_iter < mlp.max_iter
+        if verbose:
+            # mini sparkline of the loss curve (downsample to 40 points)
+            n = len(curve)
+            step = max(1, n // 40)
+            sampled = curve[::step]
+            lo, hi = min(sampled), max(sampled)
+            span = hi - lo if hi > lo else 1.0
+            bars = " ▁▂▃▄▅▆▇█"
+            spark = "".join(bars[int((v - lo) / span * 8)] for v in sampled)
+            best = (f"best_val={mlp.best_validation_score_:.5f}"
+                    if mlp.best_loss_ is None else f"best={mlp.best_loss_:.5f}")
+            print(f"[nn]  iters={n_iter}  "
+                  f"loss: {curve[0]:.5f} → {curve[-1]:.5f}  "
+                  f"{best}  "
+                  f"{'early-stopped' if stopped_early else 'max-iter reached'}")
+            print(f"[nn]  curve: {spark}")
         return self
 
     def predict(self, X):
@@ -317,21 +408,10 @@ def buy_and_hold(actual_ret):
     }
 
 
-# ============================================================ data + dataset
-def load_closes(csv_path: Path) -> tuple[np.ndarray, pd.DatetimeIndex]:
-    if not csv_path.exists():
-        print(f"[data] {csv_path.name} not found — downloading SPY 1h/2y via yfinance …")
-        import yfinance as yf
-        raw = yf.download("SPY", period="2y", interval="1h",
-                          progress=False, auto_adjust=True)
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(1)
-        raw = raw[["Open", "High", "Low", "Close", "Volume"]].dropna()
-        raw.to_csv(csv_path)
-    df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
-    return df["Close"].to_numpy(dtype=np.float64), df.index
-
-
+# ============================================================ dataset helpers
+# (Optional) build aapl_x / aapl_y from a raw 1-D close-price series, e.g.:
+#     aapl_x, aapl_y = build_close_windows(close_series, window=16)
+#     np.save("aapl_x.npy", aapl_x); np.save("aapl_y.npy", aapl_y)
 def build_close_windows(close: np.ndarray, window: int):
     """x[i] = close[i:i+window] (window closes); y[i] = close[i+window] (next)."""
     m = len(close) - window
@@ -357,75 +437,69 @@ def make_lag_windows(enc: np.ndarray, window: int) -> np.ndarray:
     return Wm
 
 
+# ============================================================ load aapl_x / aapl_y
+def load_aapl():
+    """Load the total dataset directly by filename.
+       aapl_x : (N, W) closing-price windows;  aapl_y : (N,) next-close targets."""
+    X = np.asarray(np.load(AAPL_X_FILE), dtype=np.float64)
+    y = np.asarray(np.load(AAPL_Y_FILE), dtype=np.float64).ravel()
+    print(f"[data] loaded {AAPL_X_FILE} {X.shape}  |  {AAPL_Y_FILE} {y.shape}")
+    return X, y
+
+
 # ============================================================ main
 def main():
-    p = argparse.ArgumentParser(description="HQRC + NN read-out [40,6,1] (single file)")
-    p.add_argument("--csv", default=str(CSV_PATH))
-    p.add_argument("--window", type=int, default=W_DEFAULT)
-    p.add_argument("--shots", type=int, default=1000)
-    p.add_argument("--test-frac", type=float, default=0.25)
-    p.add_argument("--target", choices=["return", "level"], default="return")
-    p.add_argument("--classical", action="store_true",
-                   help="also train an NN on the raw return windows (no quantum)")
-    p.add_argument("--noise", action="store_true", help="realistic noise (slow)")
-    p.add_argument("--limit", type=int, default=0, help="use only the last N bars")
-    p.add_argument("--batch-size", type=int, default=200)
-    p.add_argument("--no-cache", action="store_true")
-    p.add_argument("--seed", type=int, default=42)
-    args = p.parse_args()
-
     print(f"\n{'='*68}")
     print(f"  HQRC + NN read-out [40, 6, 1]  |  16 qubits (4×4) Ising reservoir")
-    print(f"  window={args.window}  shots={args.shots}  target={args.target}  "
-          f"noise={'ON' if args.noise else 'OFF'}")
+    print(f"  shots={SHOTS}  target={TARGET}  test_frac={TEST_FRAC}  "
+          f"noise={'ON' if NOISE else 'OFF'}")
     print(f"{'='*68}\n")
 
-    # 1. data
-    close, index = load_closes(Path(args.csv))
-    if args.limit:
-        close, index = close[-args.limit:], index[-args.limit:]
-    print(f"[data] {len(close)} closes  ({index[0]} → {index[-1]})")
+    # ── total dataset from aapl_x / aapl_y ──────────────────────────────────
+    X_prices, y_all = load_aapl()
+    if X_prices.ndim != 2 or X_prices.shape[1] < 2:
+        raise ValueError(f"aapl_x must be 2-D (N, W) with W>=2; got {X_prices.shape}")
+    if len(y_all) != len(X_prices):
+        raise ValueError(f"aapl_x ({len(X_prices)}) and aapl_y ({len(y_all)}) length mismatch")
+    N, W_prices = X_prices.shape
+    print(f"[dataset] aapl_x={X_prices.shape}  aapl_y={y_all.shape}")
+    print(f"[dataset] example: x[0] ends at {X_prices[0, -1]:.4f}  →  y[0]={y_all[0]:.4f}")
 
-    # 2. sliding-window close dataset (literal x / y)
-    X_close, y_close = build_close_windows(close, args.window)
-    np.save(CACHE_DIR / "nn_X_close_windows.npy", X_close)
-    np.save(CACHE_DIR / "nn_y_close.npy", y_close)
-    print(f"[dataset] x={X_close.shape}  y={y_close.shape}  → saved to cache/")
-    print(f"[dataset] example: x[0] ends at {X_close[0][-1]:.2f}  →  y[0]={y_close[0]:.2f}")
+    # price windows → tanh-normalized return windows (N, W_prices-1)
+    ret_windows = np.tanh((X_prices[:, 1:] / X_prices[:, :-1] - 1.0) / RETURN_NORM)
+    window = ret_windows.shape[1]
 
-    # 3. reservoir features aligned to each window
-    enc = encoding_series(close, RETURN_NORM)
-    res = QuantumReservoir(window=args.window, shots=args.shots,
-                           noise=args.noise, seed=args.seed)
-    Q_all = res.transform(enc, use_cache=not args.no_cache, batch_size=args.batch_size)
+    # ── quantum reservoir features via the pre-built path ───────────────────
+    res = QuantumReservoir(window=window, shots=SHOTS, noise=NOISE, seed=SEED)
+    print(f"[qrc] output_dim={res.output_dim}  "
+          f"({res.n_qubits} ⟨Z⟩ + {len(res.intra_pairs)} ⟨ZZ⟩)")
+    Q = res.transform_prebuilt(ret_windows, use_cache=USE_CACHE, batch_size=BATCH_SIZE)
 
-    t_idx = np.arange(args.window - 1, len(close) - 1)   # "current" index per row
-    Q = Q_all[t_idx]
-    current = close[t_idx]
-    next_close = close[t_idx + 1]
+    current = X_prices[:, -1]          # most recent known close in each window
+    next_close = y_all                 # target = next close
     next_ret = next_close / current - 1.0
 
-    # 4. temporal split
+    # ── time-ordered train/test split ───────────────────────────────────────
     m = len(Q)
-    split = int(m * (1 - args.test_frac))
+    split = int(m * (1 - TEST_FRAC))
     cur_te, ynext_te, ret_te = current[split:], next_close[split:], next_ret[split:]
     print(f"[split] train={split}  test={m - split}")
 
-    if args.target == "return":
+    if TARGET == "return":
         y_tr = next_ret[:split]
     else:
         y_tr = next_close[:split]
 
     def to_close_and_ret(pred):
-        if args.target == "return":
+        if TARGET == "return":
             return cur_te * (1 + pred), pred
         return pred, pred / cur_te - 1.0
 
     results = []
 
-    # 5. NN read-out on quantum features
+    # NN read-out on quantum features
     print("[train] fitting NN read-out [40,6,1] on quantum features …")
-    nn = NNReadout(hidden=6, seed=args.seed).fit(Q[:split], y_tr)
+    nn = NNReadout(hidden=6, seed=SEED).fit(Q[:split], y_tr)
     print("[test ] predicting on held-out set …")
     pred = nn.predict(Q[split:])
     pred_close, pred_ret = to_close_and_ret(pred)
@@ -433,11 +507,11 @@ def main():
     results.append(evaluate(pred_ret, sig, ret_te, pred_close, ynext_te,
                             "NN readout (quantum)"))
 
-    # 6. optional classical NN baseline (raw return windows, no quantum)
-    if args.classical:
+    # optional classical NN baseline (raw return windows, no quantum)
+    if RUN_CLASSICAL_BASELINE:
         print("[train] fitting NN baseline on raw return windows (no quantum) …")
-        Wlag = make_lag_windows(enc, args.window)[t_idx]
-        nn_c = NNReadout(hidden=6, seed=args.seed).fit(Wlag[:split], y_tr)
+        Wlag = ret_windows
+        nn_c = NNReadout(hidden=6, seed=SEED).fit(Wlag[:split], y_tr)
         pred_c = nn_c.predict(Wlag[split:])
         pc_close, pc_ret = to_close_and_ret(pred_c)
         sig_c, _, _ = signals_and_confidence(pc_ret, cur_te)

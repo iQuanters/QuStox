@@ -7,3 +7,4 @@ cache/
 .DS_Store
 *.ipynb_checkpoints/
 Drops/
+*.npy
