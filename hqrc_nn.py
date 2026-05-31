@@ -98,7 +98,7 @@ BASIS_GATES = ["rx", "ry", "rz", "rxx", "rzz"]
 #   fallback that needs NO qiskit-aer (works on QPU platforms that lack Aer).
 #   To run on a real IBM QPU instead, replace BACKEND below, e.g.:
 #       from qiskit_ibm_runtime import QiskitRuntimeService
-#       BACKEND = QiskitRuntimeService().backend("ibm_torino")
+#       BACKEND = QiskitRuntimeService().backend("ibm_marrakesh")
 #   (execution then routes through the SamplerV2 primitive automatically).
 BACKEND = AerSimulator() if HAVE_AER else "statevector"
 # ──────────────────────────────────────────────────────────────────────────────
