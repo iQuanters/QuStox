@@ -34,8 +34,8 @@ def main():
         if 'Volume' in df_new.columns:
             df_new = df_new.drop(columns=['Volume'])
             
-        # Reorder columns to CHLO
-        df_new = df_new[['Close', 'High', 'Low', 'Open']]
+        # Reorder columns to OHLC
+        df_new = df_new[['Open', 'High', 'Low', 'Close']]
         
         # Add previous closes
         num_prev = 10 if interval == "1d" else 12
