@@ -1,0 +1,21 @@
+{
+  "dataset_file": "AAPL_10m_v2.csv",
+  "reservoir_window_n": 12,
+  "n_quantum_features": 40,
+  "n_ohl": 3,
+  "n_input_features": 43,
+  "hidden": 6,
+  "encode_scale": 1.0,
+  "eff_encode_scale": 0.21551701458423042,
+  "train_p99_abs_x": 4.640004882812491,
+  "shots": 1000,
+  "noise": false,
+  "seed": 42,
+  "layer_sizes": [
+    43,
+    6,
+    1
+  ],
+  "activation": "relu",
+  "out_activation": "logistic"
+}
