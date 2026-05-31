@@ -11,3 +11,6 @@ yfinance>=0.2.40
 # External-factors / sentiment agent (optional — needs OPENAI_API_KEY in .env)
 openai>=1.30.0
 python-dotenv>=1.0.0
+
+# xpyq cloud inference (infer_xpyq.py)
+requests>=2.31.0

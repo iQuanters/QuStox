@@ -89,7 +89,8 @@ python3 -c "import qiskit, sklearn, joblib; print('quantum OK')"
 
 | Script | Purpose | Speed |
 |---|---|---|
-| `infer_pipeline.py` | **Single-bar inference** · quantum + sentiment · production use | ~30s |
+| `infer_pipeline.py` | **Single-bar inference** · local Aer simulator + sentiment | ~30s |
+| `infer_xpyq.py` | **Single-bar inference** · xpyq cloud / real IBM QPU + sentiment | ~30s–5min |
 | `run.py` | **Sentiment dashboard** · no quantum · historical testing | ~5s |
 | `main.py` | **Full backtest** · trains from scratch + tests over 2 years | ~10–20 min |
 
@@ -153,6 +154,31 @@ python3 infer_pipeline.py 2026-04-30
 # Latest bar available
 python3 infer_pipeline.py
 ```
+
+---
+
+## `infer_xpyq.py` — Cloud Inference (xpyq + IBM QPU)
+
+Same as `infer_pipeline.py` but the quantum circuits run on the **xpyq cloud platform** — free simulator or real IBM QPU via your BYOK token. Requires `XPYQ_API_KEY` in `.env`.
+
+```bash
+# xpyq cloud simulator (free, validates full cloud round-trip)
+python3 infer_xpyq.py --index -1
+
+# Specific date, cloud sim, with sentiment
+python3 infer_xpyq.py 2026-04-30 --ticker AAPL
+
+# Real IBM QPU — prints cost estimate only (safe to run)
+python3 infer_xpyq.py --index -1 --mode qpu --backend ibm_marrakesh
+
+# Real IBM QPU — actually submits (uses your IBM quota)
+python3 infer_xpyq.py --index -1 --mode qpu --backend ibm_marrakesh --confirm
+
+# Skip sentiment
+python3 infer_xpyq.py --index -1 --no-sentiment
+```
+
+> Set `XPYQ_API_KEY` and optionally `IBM_QUANTUM_TOKEN` in your `.env` file.
 
 ---
 
@@ -339,11 +365,12 @@ QuStox/
 ├── readout_weights.joblib     # Pre-trained MLP (AAPL 10-min)
 ├── readout_weights.json       # Weights config (window, encode_scale, seed)
 │
-├── infer_pipeline.py          # ⭐ Main inference script: quantum + sentiment
+├── infer_pipeline.py          # ⭐ Inference: local Aer simulator + sentiment
+├── infer_xpyq.py              # ⭐ Inference: xpyq cloud / real IBM QPU + sentiment
+├── infer.py                   # Shared utilities (QuantumReservoir, helpers)
 ├── run.py                     # Sentiment-only dashboard CLI
 ├── main.py                    # Full training + backtest pipeline
-├── hqrc_nn.py                 # Training script → produces readout_weights.*
-├── infer.py                   # Original inference script (Sanket)
+├── reservoir_diagram.png      # Architecture diagram (16-qubit topology)
 │
 ├── .env                       # API keys (gitignored — never committed)
 ├── .env.example               # Template
@@ -359,6 +386,8 @@ QuStox/
 | `OPENAI_API_KEY` | Yes (sentiment) | — | OpenAI API key |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | Model for regime classification |
 | `OPENAI_RECALL_MODEL` | No | `gpt-4o` | Model for historical headline recall |
+| `XPYQ_API_KEY` | Yes (`infer_xpyq.py`) | — | xpyq cloud platform API key |
+| `IBM_QUANTUM_TOKEN` | Yes (`--mode qpu`) | — | IBM Quantum token for real QPU |
 
 ---
 
