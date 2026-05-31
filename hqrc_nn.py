@@ -20,30 +20,38 @@ reservoir dynamics. A majority-class baseline is also reported.
 
 Everything needed to TRAIN and TEST lives in this one file.
 
-Dependencies: numpy, scikit-learn, qiskit, qiskit-aer.
+Dependencies: numpy, pandas, scikit-learn (+ bundled joblib), qiskit, qiskit-aer.
 
-How to run (no command line / no arguments needed)
+How to run (one self-contained file, no prep step)
 --------------------------------------------------
-Just execute this file. It loads the dataset directly from three .npy files in
-the run directory (produced by prepare_data.py):
+Just execute this file. It loads the dataset directly from a SINGLE CSV — the
+v2 file produced by transform_aapl.py / build_dataset.py — with columns:
 
-  * aapl_x.npy   : (N, n) close_prev windows   [oldest … newest]  → reservoir
-  * aapl_ohl.npy : (N, 3) Open, High, Low                         → NN (concatenated)
-  * aapl_y.npy   : (N,)   labels   1 = buy, 0 = sell              → target
+  * Open, High, Low                 → concatenated to the NN readout input
+  * Close_prev_1 … Close_prev_n     → (N, n) window that EVOLVES the reservoir
+                                       [Close_prev_1 = oldest … n = most recent]
+  * target  ('buy' / 'sell')        → label  (1 = buy, 0 = sell)
 
-then splits it (time-ordered) into train / test. All knobs live in the CONFIG
-block below — edit those values, then run.
+No prepare_data.py / .npy step is needed. Point DATASET_FILE at the CSV (or pass
+it as the one optional CLI argument). After training, the readout-layer weights
+are saved (READOUT_PATH.joblib / .npz / .json) so the trained classifier can be
+reloaded and applied to fresh reservoir features on the QPU without retraining.
+
+All knobs live in the CONFIG block below — edit those values, then run.
 ================================================================================
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import sys
 import time
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
@@ -75,11 +83,21 @@ except Exception:
 BASIS_GATES = ["rx", "ry", "rz", "rxx", "rzz"]
 
 # ============================================================ CONFIG (edit here)
-# No command line is used — change these values and run the file directly.
-# Dataset files (referenced directly by name, relative to the run directory):
-AAPL_X_FILE   = "aapl_x.npy"     # (N, n) close_prev windows  → evolve the reservoir
-AAPL_OHL_FILE = "aapl_ohl.npy"   # (N, 3) Open, High, Low      → concatenated to NN input
-AAPL_Y_FILE   = "aapl_y.npy"     # (N,)   labels: 1 = buy, 0 = sell
+# Change these values and run the file directly. The dataset path may also be
+# given as the single optional CLI argument (overrides DATASET_FILE).
+
+# ── EXECUTION BACKEND — swap these lines to move between simulator and QPU ────
+#    Keep exactly ONE BACKEND active; comment the other out.
+BACKEND = AerSimulator()                                      # ① local simulator (default)
+# from qiskit_ibm_runtime import QiskitRuntimeService          # ② real IBM QPU — uncomment
+# BACKEND = QiskitRuntimeService().backend("ibm_torino")       #    these two lines & comment ①
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ONE self-contained CSV (Open, High, Low, Close_prev_1..n, target):
+DATASET_FILE  = "AAPL_10m_v2.csv"
+
+SAVE_READOUT  = True             # persist the trained readout layer after training
+READOUT_PATH  = "readout_weights"  # writes READOUT_PATH .joblib / .npz / .json
 
 SHOTS = 1000                     # measurement shots per window (mean states)
 NOISE = False                    # realistic noise (much slower — leave False unless testing)
@@ -87,6 +105,7 @@ TEST_FRAC = 0.25                 # fraction of the (time-ordered) data held out 
 ENCODE_SCALE = 1.0               # RX encoding scale applied to the close_prev values
 RUN_CLASSICAL_BASELINE = True    # also train an NN on a CLASSICAL reservoir (matched topology)
 CLASSICAL_SPECTRAL_RADIUS = 0.9  # echo-state property for the classical reservoir (fading memory)
+CONF_THRESHOLD = 60.0            # only act when confidence ≥ this (0-100); low-conf rows are dropped
 BATCH_SIZE = 200                 # circuits simulated per Aer batch
 USE_CACHE = True                 # cache reservoir features to cache/ (instant re-runs)
 SEED = 42
@@ -132,7 +151,7 @@ class QuantumReservoir:
 
     def __init__(self, window=12, n_groups=4, group_size=4, shots=1000,
                  trotter_steps=1, evo_time=1.0, encode_scale=1.0,
-                 noise=False, seed=42):
+                 noise=False, seed=42, backend=None):
         self.n_groups, self.group_size = n_groups, group_size
         self.n_qubits = n_groups * group_size
         self.window, self.shots = window, shots
@@ -155,7 +174,12 @@ class QuantumReservoir:
         self.Jx = rng.uniform(-1.0, 1.0, len(self.edges))
         self.Jz = rng.uniform(-1.0, 1.0, len(self.edges))
 
-        self.sim = AerSimulator(noise_model=build_noise_model() if noise else None)
+        # use the BACKEND chosen at the top of the file (simulator or real QPU)
+        self.sim = backend if backend is not None else BACKEND
+        if self.noise and isinstance(self.sim, AerSimulator):
+            self.sim.set_options(noise_model=build_noise_model())
+        # NOTE: on real IBM hardware, backend.run is deprecated — execution there
+        # should go through the SamplerV2 primitive (transpile stays the same).
 
     @property
     def output_dim(self) -> int:
@@ -199,6 +223,31 @@ class QuantumReservoir:
         zz = np.array([probs @ (bits[:, i] * bits[:, j]) for i, j in self.intra_pairs])
         return np.concatenate([z, zz])
 
+    def _run_counts(self, tqc: list) -> list[dict]:
+        """
+        Execute the transpiled circuits and return one counts dict per circuit.
+        Branches on the active BACKEND so the same code path serves both:
+          * AerSimulator        → backend.run(...)            (fast local sim)
+          * real IBM QPU/runtime → SamplerV2 primitive        (backend.run is
+                                                                deprecated there)
+        """
+        if isinstance(self.sim, AerSimulator):
+            result = self.sim.run(tqc, shots=self.shots).result()
+            return [result.get_counts(i) for i in range(len(tqc))]
+
+        # real hardware / Qiskit Runtime → SamplerV2 (imported lazily)
+        from qiskit_ibm_runtime import SamplerV2
+        sampler = SamplerV2(mode=self.sim)
+        job = sampler.run([(c,) for c in tqc], shots=self.shots)
+        res = job.result()
+        counts = []
+        for r in res:
+            data = r.data
+            # measure_all() writes to a classical register named "meas"
+            reg = data.meas if hasattr(data, "meas") else next(iter(data.values()))
+            counts.append(reg.get_counts())
+        return counts
+
     def _cache_key(self, windows: np.ndarray) -> Path:
         cfg = (f"{self.n_qubits}_{self.window}_{self.shots}_{self.trotter_steps}_"
                f"{self.evo_time}_{self.encode_scale}_{int(self.noise)}_{self.seed}")
@@ -227,9 +276,9 @@ class QuantumReservoir:
             end = min(start + batch_size, n)
             circuits = [self.build_circuit(windows[t]) for t in range(start, end)]
             tqc = transpile(circuits, self.sim, optimization_level=1)
-            result = self.sim.run(tqc, shots=self.shots).result()
+            batch_counts = self._run_counts(tqc)
             for i in range(end - start):
-                feats[start + i] = self._counts_to_features(result.get_counts(i))
+                feats[start + i] = self._counts_to_features(batch_counts[i])
 
             if verbose:
                 elapsed = time.time() - t0
@@ -372,6 +421,39 @@ class NNClassifier:
         buy_col = list(mlp.classes_).index(1)
         return self.model.predict_proba(X)[:, buy_col]
 
+    def save(self, path: str, meta: dict | None = None) -> None:
+        """
+        Persist the trained readout layer (StandardScaler + MLP) so it can be
+        reloaded and applied to fresh reservoir features without retraining:
+          * {path}.joblib : the full sklearn pipeline (load with joblib.load)
+          * {path}.npz    : raw weights (scaler mean/scale, MLP coefs/intercepts)
+          * {path}.json   : metadata describing the feature pipeline it expects
+        """
+        from joblib import dump
+        pipe = self.model
+        scaler = pipe.named_steps["standardscaler"]
+        mlp = pipe.named_steps["mlpclassifier"]
+
+        dump(pipe, f"{path}.joblib")
+
+        arrays = {
+            "scaler_mean": scaler.mean_, "scaler_scale": scaler.scale_,
+            "classes": np.asarray(mlp.classes_),
+        }
+        for i, c in enumerate(mlp.coefs_):
+            arrays[f"coef_{i}"] = c
+        for i, b in enumerate(mlp.intercepts_):
+            arrays[f"intercept_{i}"] = b
+        np.savez(f"{path}.npz", **arrays)
+
+        if meta is not None:
+            layers = [int(mlp.coefs_[0].shape[0])] + \
+                     [int(b.shape[0]) for b in mlp.intercepts_]
+            meta = {**meta, "layer_sizes": layers,
+                    "activation": mlp.activation, "out_activation": mlp.out_activation_}
+            with open(f"{path}.json", "w") as f:
+                json.dump(meta, f, indent=2)
+
 
 def class_confidence(proba_buy: np.ndarray) -> np.ndarray:
     """0-100 confidence = |2·P(buy) − 1|·100  (0 = coin-flip, 100 = certain)."""
@@ -392,28 +474,59 @@ def classification_metrics(y_true, y_pred, name) -> dict:
     }
 
 
+def confidence_report(y_true, pred, conf, thresholds=(0, 20, 40, 60, 80)):
+    """Accuracy & coverage when only high-confidence rows are acted on."""
+    y_true = np.asarray(y_true); pred = np.asarray(pred); conf = np.asarray(conf)
+    n = len(y_true)
+    print(f"    {'conf ≥':>7}{'kept':>8}{'coverage':>11}{'accuracy':>11}")
+    for th in thresholds:
+        mask = conf >= th
+        k = int(mask.sum())
+        acc = accuracy_score(y_true[mask], pred[mask]) if k else float("nan")
+        acc_s = f"{acc:.1%}" if k else "—"
+        print(f"    {th:>7.0f}{k:>8}{k/n:>10.1%}{acc_s:>11}")
+    # robust view: the most-confident slices (guaranteed non-empty coverage)
+    for frac in (0.25, 0.10):
+        thr = float(np.quantile(conf, 1.0 - frac))
+        mask = conf >= thr
+        k = int(mask.sum())
+        acc = accuracy_score(y_true[mask], pred[mask]) if k else float("nan")
+        print(f"    top {int(frac*100):>2}% confident (conf ≥ {thr:4.0f}): "
+              f"kept {k} ({k/n:.0%})  accuracy {acc:.1%}")
+
+
 # ============================================================ load dataset
-def _load_labels(path: str) -> np.ndarray:
-    y = np.load(path, allow_pickle=True).ravel()
-    if y.dtype.kind in "US":            # strings like 'buy' / 'sell'
-        return (np.char.lower(y.astype(str)) == "buy").astype(int)
-    return y.astype(int)
+def load_dataset(path: str):
+    """
+    Load everything the experiment needs from ONE CSV (folds in prepare_data.py):
+      X   : (N, n) Close_prev_1..n  [oldest … newest]  → evolves the reservoir
+      OHL : (N, 3) Open, High, Low  (optional)         → concatenated to the NN
+      y   : (N,)   target  (1 = buy, 0 = sell)
+    """
+    if not Path(path).exists():
+        raise FileNotFoundError(f"dataset CSV not found: {path}")
+    df = pd.read_csv(path)
 
+    prev_cols = sorted(
+        [c for c in df.columns if c.lower().startswith("close_prev_")],
+        key=lambda c: int(c.split("_")[-1]),
+    )
+    if not prev_cols:
+        raise ValueError(f"{path}: no Close_prev_* columns found")
+    X = df[prev_cols].to_numpy(dtype=np.float64)            # (N, n)
 
-def load_aapl():
-    """Load X (reservoir input), OHL (extra NN features, optional), y (labels)."""
-    X = np.asarray(np.load(AAPL_X_FILE), dtype=np.float64)
-    y = _load_labels(AAPL_Y_FILE)
-    if Path(AAPL_OHL_FILE).exists():
-        OHL = np.asarray(np.load(AAPL_OHL_FILE), dtype=np.float64)
-        if OHL.ndim == 1:
-            OHL = OHL.reshape(-1, 1)
-    else:
-        OHL = None
-        print(f"[data] note: {AAPL_OHL_FILE} not found — using quantum features only")
-    print(f"[data] {AAPL_X_FILE} {X.shape}  |  "
-          f"{AAPL_OHL_FILE} {None if OHL is None else OHL.shape}  |  "
-          f"{AAPL_Y_FILE} {y.shape}")
+    ohl_cols = [c for c in ["Open", "High", "Low"] if c in df.columns]
+    OHL = df[ohl_cols].to_numpy(dtype=np.float64) if ohl_cols else None
+    if OHL is None:
+        print("[data] note: no Open/High/Low columns — using quantum features only")
+
+    if "target" not in df.columns:
+        raise ValueError(f"{path}: no 'target' column found")
+    y = (df["target"].astype(str).str.lower() == "buy").astype(int).to_numpy()
+
+    print(f"[data] {path}  →  X {X.shape}  |  "
+          f"OHL {None if OHL is None else OHL.shape}  |  y {y.shape}  "
+          f"(n lags = {len(prev_cols)})")
     return X, OHL, y
 
 
@@ -425,8 +538,9 @@ def main():
           f"test_frac={TEST_FRAC}  noise={'ON' if NOISE else 'OFF'}")
     print(f"{'='*70}\n")
 
-    # ── dataset ──────────────────────────────────────────────────────────────
-    X, OHL, y = load_aapl()
+    # ── dataset (ONE self-contained CSV; CLI arg overrides the config) ─────────
+    dataset_file = sys.argv[1] if len(sys.argv) > 1 else DATASET_FILE
+    X, OHL, y = load_dataset(dataset_file)
     if X.ndim != 2 or X.shape[1] < 1:
         raise ValueError(f"aapl_x must be 2-D (N, n); got {X.shape}")
     if len(y) != len(X) or (OHL is not None and len(OHL) != len(X)):
@@ -470,11 +584,29 @@ def main():
     # ── QRC + NN classifier ───────────────────────────────────────────────────
     print("[train] fitting NN classifier [43,6,1] on quantum+OHL features …")
     clf = NNClassifier(hidden=6, seed=SEED).fit(feats[:split], y[:split])
+
+    # ── persist the trained readout layer (for reuse on the QPU) ──────────────
+    if SAVE_READOUT:
+        clf.save(READOUT_PATH, meta={
+            "dataset_file": dataset_file,
+            "reservoir_window_n": int(n),
+            "n_quantum_features": int(Q.shape[1]),
+            "n_ohl": int(extra),
+            "n_input_features": int(feats.shape[1]),
+            "hidden": 6,
+            "encode_scale": ENCODE_SCALE,
+            "eff_encode_scale": float(eff_scale),
+            "train_p99_abs_x": float(train_scale),
+            "shots": SHOTS, "noise": bool(NOISE), "seed": SEED,
+        })
+        print(f"[save] readout weights → {READOUT_PATH}.joblib / .npz / .json")
+
     proba = clf.proba_buy(feats[split:])
     pred = (proba >= 0.5).astype(int)
     conf = class_confidence(proba)
     results.append(classification_metrics(yte, pred, "QRC + NN (quantum)"))
     cm = confusion_matrix(yte, pred, labels=[1, 0])   # rows/cols ordered [buy, sell]
+    conf_models = [("QRC + NN (quantum)", pred, conf)]
 
     # ── classical-reservoir baseline: identical pipeline, classical ESN ───────
     #   close_prev → classical reservoir (40 features) → [40 | OHL] → same NN.
@@ -485,8 +617,11 @@ def main():
         feats_c = Qc if OHL is None else np.hstack([Qc, OHL])
         print("[train] fitting NN classifier on classical-reservoir features …")
         clf_c = NNClassifier(hidden=6, seed=SEED).fit(feats_c[:split], y[:split])
-        pred_c = clf_c.predict(feats_c[split:])
+        proba_c = clf_c.proba_buy(feats_c[split:])
+        pred_c = (proba_c >= 0.5).astype(int)
+        conf_c = class_confidence(proba_c)
         results.append(classification_metrics(yte, pred_c, "Classical reservoir + NN"))
+        conf_models.append(("Classical reservoir + NN", pred_c, conf_c))
 
     # ── majority-class baseline ───────────────────────────────────────────────
     maj = 1 if y[:split].mean() >= 0.5 else 0
@@ -508,13 +643,29 @@ def main():
     print(f"  {'act buy':>10}{tp:>10}{fn:>11}")
     print(f"  {'act sell':>10}{fp:>10}{tn:>11}")
 
-    print("\n  Sample predictions (last 10 test rows):")
-    print(f"  {'actual':>8}{'pred':>8}{'conf%':>8}{'result':>9}")
-    for i in range(max(0, len(yte) - 10), len(yte)):
+    # ── high-confidence decisions: drop low-confidence rows, report the rest ──
+    print("\n" + "=" * 72)
+    print(f"  HIGH-CONFIDENCE EVALUATION — act only when confidence ≥ {CONF_THRESHOLD:.0f}")
+    print("=" * 72)
+    for name, p, c in conf_models:
+        mask = c >= CONF_THRESHOLD
+        k = int(mask.sum())
+        acc = accuracy_score(yte[mask], p[mask]) if k else float("nan")
+        head = (f"acted on {k}/{len(yte)} ({k/len(yte):.1%}), "
+                f"accuracy {acc:.1%}" if k else
+                f"no rows reached confidence ≥ {CONF_THRESHOLD:.0f}")
+        print(f"\n  {name}  →  {head}")
+        confidence_report(yte, p, c)
+
+    print(f"\n  Sample predictions (last 12 test rows; act at conf ≥ {CONF_THRESHOLD:.0f}):")
+    print(f"  {'actual':>8}{'pred':>8}{'conf%':>8}{'decision':>10}{'result':>9}")
+    for i in range(max(0, len(yte) - 12), len(yte)):
         a = "buy" if yte[i] == 1 else "sell"
-        p = "buy" if pred[i] == 1 else "sell"
-        ok = "✓" if pred[i] == yte[i] else "✗"
-        print(f"  {a:>8}{p:>8}{conf[i]:>7.1f}{ok:>9}")
+        pl = "buy" if pred[i] == 1 else "sell"
+        traded = conf[i] >= CONF_THRESHOLD
+        dec = "ACT" if traded else "skip"
+        ok = ("✓" if pred[i] == yte[i] else "✗") if traded else "—"
+        print(f"  {a:>8}{pl:>8}{conf[i]:>7.1f}{dec:>10}{ok:>9}")
     print()
 
     return results
