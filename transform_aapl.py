@@ -4,7 +4,9 @@ transform_aapl.py — create a transformed version of AAPL_10m.csv.
 
 Per-row, using each row's own Close value C:
 
-  1. target        : 'buy'  if Close > Close_prev_1, else 'sell'
+  1. target        : 'buy' if the NEXT bar's Close > this Close, else 'sell'
+                     (a genuine next-bar forecast — the label is NOT contained in
+                      the features, so no leakage; the final row is dropped)
   2. Open/High/Low : divided by C
   3. Close_prev_1..n : subtracted by C  (C is the reference point)
   4. Reverse order : new Close_prev_1 = old Close_prev_n (oldest lag)
@@ -37,8 +39,9 @@ print(f"detected {n} lag columns: {prev_cols_orig[0]} … {prev_cols_orig[-1]}")
 before = df.iloc[0].copy()
 C0 = before["Close"]
 
-# ── 1. target ─────────────────────────────────────────────────────────────────
-df["target"] = (df["Close"] > df["Close_prev_1"]).map({True: "buy", False: "sell"})
+# ── 1. target: direction of the NEXT bar (forecast — no leakage) ──────────────
+next_close = df["Close"].shift(-1)
+df["target"] = (next_close > df["Close"]).map({True: "buy", False: "sell"})
 
 # ── 2. Open / High / Low  ÷  Close (per-row) ──────────────────────────────────
 C = df["Close"]
@@ -68,6 +71,9 @@ price_cols = [c for c in ["Open", "High", "Low"] if c in df.columns]
 col_order = meta_cols + price_cols + new_prev_cols + ["target"]
 df = df[col_order]
 
+# drop the final row — it has no next bar, so its forecast target is undefined
+df = df.iloc[:-1].copy()
+
 df.to_csv(DST, index=False)
 
 # ── show the work ─────────────────────────────────────────────────────────────
@@ -84,6 +90,6 @@ for i, orig in enumerate(prev_cols_orig):
     new_lag  = int(new_name.split("_")[-1])
     arrow = f"lag {orig_lag:>2} → lag {new_lag:>2}"
     print(f"{orig:<20}{before[orig]:>14.4f}{after[new_name]:>14.4f}   - C  |  {arrow}")
-t_before = "buy" if before["Close"] > before["Close_prev_1"] else "sell"
-print(f"{'target':<20}{'—':>14}{after['target']:>14}   Close {'>' if t_before=='buy' else '<'} Close_prev_1")
+print(f"{'target':<20}{'—':>14}{after['target']:>14}   next Close "
+      f"{'>' if after['target']=='buy' else '<'} this Close")
 print(f"\nrows: {len(df)}   columns: {len(df.columns)}   →  saved {DST.name}")
