@@ -14,8 +14,12 @@ dynamically adjust its context window size.
 ```
 yfinance (^VIX + SPY news)
         ↓
-  External Factors Agent          ← this module
-  (news_fetcher + OpenAI)
+  news_fetcher.py
+  ├── Live news: yfinance (last ~10 articles)
+  └── Historical news: OpenAI gpt-4o recall (events back to ~2020)
+        ↓
+  sentiment_analyzer.py
+  └── OpenAI gpt-4o-mini → regime label + sentiment score (JSON mode)
         ↓
   ExternalFactors.window_multiplier
         ↓
@@ -94,11 +98,11 @@ That's it. One import, one call, one value passed in.
 ```python
 @dataclass
 class ExternalFactors:
-    regime:            str    # e.g. "NORMAL", "FED_EVENT", "CRISIS"
-    window_multiplier: float  # e.g. 1.0, 0.5, 0.4  — pass to predictor
+    regime:            str    # e.g. "NORMAL", "FED_EVENT", "GEOPOLITICAL"
+    window_multiplier: float  # e.g. 1.0, 0.5, 0.55 — pass to predictor
     sentiment_score:   float  # -1.0 (bearish) → +1.0 (bullish)
     reasoning:         str    # one-sentence explanation from OpenAI
-    vix_current:       float  # latest VIX close
+    vix_current:       float  # VIX close on or before as_of
     vix_trend:         str    # "RISING" | "FALLING" | "STABLE"
     headlines_used:    int    # number of headlines analysed
     as_of:             datetime
@@ -120,6 +124,74 @@ class ExternalFactors:
 
 ---
 
+## News headline sources
+
+The module uses two sources depending on the date:
+
+| Date range | Source | How |
+|---|---|---|
+| Last few days | yfinance live news | `Ticker.news` — real articles |
+| Up to ~Apr 2025 | OpenAI `gpt-4o` recall | GPT's training data covers major market events |
+| After ~Apr 2025 | `--scenario` flag | Pre-loaded headlines for events past GPT cutoff |
+
+The source is tracked and printed:
+```
+News : 10 headlines  [recalled by OpenAI (historical)]
+News : 3 headlines   [live via yfinance]
+```
+
+---
+
+## Standalone demo (no HQRC needed)
+
+### Live signal
+```bash
+python3 run.py SPY          # SPY right now
+python3 run.py AAPL         # any ticker
+```
+
+### Historical backtesting — GPT recalls headlines automatically
+```bash
+python3 run.py SPY --as-of "2024-11-05"   # US Election Day 2024
+python3 run.py SPY --as-of "2024-09-18"   # Fed 50bps rate cut
+python3 run.py SPY --as-of "2020-03-16"   # COVID crash
+python3 run.py SPY --as-of "2022-02-24"   # Russia invades Ukraine
+```
+
+### Events past GPT training cutoff — pre-loaded scenario
+```bash
+python3 run.py SPY --scenario geopolitical   # US-Israel-Iran war (Jun 2025)
+```
+
+**Rule:** if the date is before ~April 2025 → use `--as-of`, GPT recalls.  
+After April 2025 → use `--scenario` (pre-loaded headlines required).
+
+---
+
+## Historical backtesting example (Python)
+
+```python
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+load_dotenv()
+
+from src.agents import get_external_factors
+
+# US Election Day 2024 — GPT recalls real election headlines
+factors = get_external_factors("SPY", as_of=datetime(2024, 11, 5, tzinfo=timezone.utc))
+# → regime="ELECTION", multiplier=0.6, sentiment_score ~-0.4 to +0.7
+
+# Fed 50bps surprise cut Sep 2024
+factors = get_external_factors("SPY", as_of=datetime(2024, 9, 18, tzinfo=timezone.utc))
+# → regime="FED_EVENT", multiplier=0.5
+
+# COVID crash Mar 2020
+factors = get_external_factors("SPY", as_of=datetime(2020, 3, 16, tzinfo=timezone.utc))
+# → regime="CRISIS", multiplier=0.4, sentiment_score ~-0.9
+```
+
+---
+
 ## Full end-to-end example
 
 ```python
@@ -136,13 +208,8 @@ from pathlib import Path
 DATA_DIR = Path("dataset")
 TICKER   = "SPY"
 
-# ── 1. Get external factors (live, right now) ─────────────────────────────────
+# ── 1. Get external factors ───────────────────────────────────────────────────
 factors = get_external_factors(TICKER, verbose=True)
-
-print(f"\nRegime     : {factors.regime}")
-print(f"Multiplier : {factors.window_multiplier}x")
-print(f"Sentiment  : {factors.sentiment_score:+.2f}")
-print(f"Reasoning  : {factors.reasoning}")
 
 # ── 2. Run HQRC on each timeframe with adjusted window ────────────────────────
 cfg       = HQRCConfig(mode="pennylane")   # or "xpyq_qpu" for IBM hardware
@@ -150,94 +217,31 @@ predictor = HQRCPredictor(cfg)
 
 for timeframe in ["10m", "30m", "1d"]:
     tf_cfg = TIMEFRAME_SETTINGS[timeframe]
-
-    df   = load_csv(TICKER, timeframe, DATA_DIR)
-    data = compute_features(df, TICKER, timeframe)
+    df     = load_csv(TICKER, timeframe, DATA_DIR)
+    data   = compute_features(df, TICKER, timeframe)
 
     result = predictor.predict(
         data=data,
         tf_cfg=tf_cfg,
         regime_multiplier=factors.window_multiplier,  # ← from sentiment agent
     )
+    print(f"[{timeframe}]  {result.signal}  conf={result.confidence:.0%}")
 
-    print(f"\n[{timeframe}]  {result.signal}  "
-          f"conf={result.confidence:.0%}  "
-          f"cv_acc={result.cv_accuracy:.1%}")
-
-# ── 3. Final output ───────────────────────────────────────────────────────────
-print(f"\n{'─'*40}")
+# ── 3. Summary ────────────────────────────────────────────────────────────────
 print(f"REGIME    : {factors.regime}  ({factors.window_multiplier}x window)")
-print(f"SENTIMENT : {factors.sentiment_score:+.2f}  ({factors.vix_current:.1f} VIX)")
+print(f"SENTIMENT : {factors.sentiment_score:+.2f}  (VIX {factors.vix_current:.1f})")
 print(f"REASONING : {factors.reasoning}")
-```
-
-### Expected output
-
-```
-── External Factors  [SPY  @  now] ──
-   Fetching market context …
-   VIX  : 15.3  (p14, FALLING)
-   News : 5 headlines
-   Classifying regime via Claude …
-   Regime     : NORMAL
-   Multiplier : 1.0×
-   Sentiment  : +0.20
-   Reasoning  : Low VIX with stable macro backdrop suggests normal conditions.
-
-[10m]  BUY   conf=63%  cv_acc=57.2%
-[30m]  BUY   conf=68%  cv_acc=58.1%
-[1d]   HOLD  conf=54%  cv_acc=55.9%
-
-────────────────────────────────────────
-REGIME    : NORMAL  (1.0x window)
-SENTIMENT : +0.20  (15.3 VIX)
-REASONING : Low VIX with stable macro backdrop suggests normal conditions.
-```
-
----
-
-## Historical / backtesting mode
-
-Pass `as_of` to get the sentiment for any past date — useful for validating
-that the regime classifier would have caught known events:
-
-```python
-from datetime import datetime, timezone
-
-# US Election Day 2024
-factors = get_external_factors(
-    "SPY",
-    as_of=datetime(2024, 11, 5, tzinfo=timezone.utc),
-)
-# → regime="ELECTION", multiplier=0.6, sentiment_score=-0.60
-
-# COVID crash
-factors = get_external_factors(
-    "SPY",
-    as_of=datetime(2020, 3, 16, tzinfo=timezone.utc),
-)
-# → regime="CRISIS", multiplier=0.4, sentiment_score=-0.95
-```
-
----
-
-## Standalone demo (no HQRC needed)
-
-```bash
-python3 run.py SPY                          # live signal right now
-python3 run.py AAPL                         # different ticker
-python3 run.py SPY --as-of "2024-11-05"     # election day backtest
-python3 run.py SPY --as-of "2020-03-16"     # COVID crash
 ```
 
 ---
 
 ## Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | ✅ Yes | OpenAI API key — get at platform.openai.com |
-| `OPENAI_MODEL` | No | Override model (default: `gpt-4o-mini`) |
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `OPENAI_API_KEY` | ✅ Yes | — | Get at platform.openai.com |
+| `OPENAI_MODEL` | No | `gpt-4o-mini` | Model for sentiment classification |
+| `OPENAI_RECALL_MODEL` | No | `gpt-4o` | Model for historical headline recall (needs later training cutoff) |
 
 ---
 
@@ -246,7 +250,7 @@ python3 run.py SPY --as-of "2020-03-16"     # COVID crash
 ```
 src/agents/
 ├── __init__.py               ← exports get_external_factors()
-├── news_fetcher.py           ← VIX + headlines from yfinance
-├── sentiment_analyzer.py     ← OpenAI JSON classification
-└── external_factors.py       ← public get_external_factors()
+├── news_fetcher.py           ← VIX from yfinance + headlines (live or GPT recall)
+├── sentiment_analyzer.py     ← OpenAI gpt-4o-mini JSON classification
+└── external_factors.py       ← public get_external_factors() entry point
 ```
