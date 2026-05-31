@@ -1,10 +1,16 @@
 [project]
-name = "8-quantum"
+name = "qustox"
 version = "0.1.0"
-description = "Add your description here"
+description = "External factors & sentiment analysis agent for HQRC trading pipeline"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 dependencies = [
-    "qiskit>=2.4.1",
-    "yfinance>=1.4.1",
+    # Market data (headlines + VIX)
+    "yfinance>=0.2.40",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    # OpenAI API (regime classification + sentiment analysis)
+    "openai>=1.30.0",
+    # Environment variables
+    "python-dotenv>=1.0.0",
 ]
