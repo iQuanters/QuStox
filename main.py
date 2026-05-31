@@ -65,8 +65,41 @@ def main():
             else:
                 df.index = df.index.tz_localize(None)
             return df
+            
+        if os.path.exists(filepath):
+            print(f"Existing raw file found at {filepath}. Performing incremental update...")
+            # Load old data
+            df_old = pd.read_csv(filepath, index_col=0)
+            df_old.index = pd.to_datetime(df_old.index, utc=True)
+            if interval in ["5m", "1h"]:
+                df_old.index = df_old.index.tz_convert("America/New_York")
+            else:
+                df_old.index = df_old.index.tz_localize(None)
+                
+            last_ts = df_old.index[-1]
+            print(f"Last available datapoint for {ticker} {interval}: {last_ts}")
+            
+            # Fetch only the new data starting from last_ts
+            print(f"Downloading new {interval} data for {ticker} starting from {last_ts}...")
+            df_new = yf.download(ticker, start=last_ts, interval=interval, auto_adjust=True, prepost=prepost, multi_level_index=False)
+            
+            if not df_new.empty:
+                # Merge old and new
+                df_combined = pd.concat([df_old, df_new])
+                # Deduplicate, keeping the latest entry for any overlapping timestamps
+                df_combined = df_combined[~df_combined.index.duplicated(keep='last')]
+                # Sort chronologically
+                df_combined.sort_index(inplace=True)
+                # Save back to CSV
+                df_combined.to_csv(filepath)
+                print(f"Dataset updated. Total rows: {len(df_combined)} (added {len(df_combined) - len(df_old)} new rows).")
+                return df_combined
+            else:
+                print("No new data found. Using existing cached data.")
+                return df_old
         else:
-            print(f"Downloading {interval} data for {ticker} (period={period})...")
+            # File doesn't exist, perform full download
+            print(f"No existing raw file found. Performing full download of {interval} data (period={period})...")
             df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, prepost=prepost, multi_level_index=False)
             if not df.empty:
                 df.to_csv(filepath)
