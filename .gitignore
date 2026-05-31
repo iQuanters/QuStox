@@ -8,3 +8,6 @@ cache/
 *.ipynb_checkpoints/
 Drops/
 *.npy
+
+# generated trained-readout artifacts (regenerable by running hqrc_nn.py)
+readout_weights.*

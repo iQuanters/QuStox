@@ -20,7 +20,9 @@ reservoir dynamics. A majority-class baseline is also reported.
 
 Everything needed to TRAIN and TEST lives in this one file.
 
-Dependencies: numpy, pandas, scikit-learn (+ bundled joblib), qiskit, qiskit-aer.
+Dependencies: numpy, pandas, scikit-learn (+ bundled joblib), qiskit.
+qiskit-aer is OPTIONAL — without it the reservoir runs on a base-qiskit
+statevector simulator (or set BACKEND to a real QPU). Only NOISE=True needs Aer.
 
 How to run (one self-contained file, no prep step)
 --------------------------------------------------
@@ -54,13 +56,18 @@ import numpy as np
 import pandas as pd
 
 from qiskit import QuantumCircuit, transpile
-from qiskit_aer import AerSimulator
-from qiskit_aer.noise import (
-    NoiseModel,
-    depolarizing_error,
-    thermal_relaxation_error,
-    ReadoutError,
-)
+
+try:                                  # qiskit-aer is OPTIONAL (absent on some QPU platforms)
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import (
+        NoiseModel,
+        depolarizing_error,
+        thermal_relaxation_error,
+        ReadoutError,
+    )
+    HAVE_AER = True
+except ImportError:
+    HAVE_AER = False                  # → fall back to a base-qiskit statevector simulator
 
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
@@ -86,11 +93,14 @@ BASIS_GATES = ["rx", "ry", "rz", "rxx", "rzz"]
 # Change these values and run the file directly. The dataset path may also be
 # given as the single optional CLI argument (overrides DATASET_FILE).
 
-# ── EXECUTION BACKEND — swap these lines to move between simulator and QPU ────
-#    Keep exactly ONE BACKEND active; comment the other out.
-BACKEND = AerSimulator()                                      # ① local simulator (default)
-# from qiskit_ibm_runtime import QiskitRuntimeService          # ② real IBM QPU — uncomment
-# BACKEND = QiskitRuntimeService().backend("ibm_torino")       #    these two lines & comment ①
+# ── EXECUTION BACKEND ─────────────────────────────────────────────────────────
+#   Default: local Aer simulator if installed, else a base-qiskit "statevector"
+#   fallback that needs NO qiskit-aer (works on QPU platforms that lack Aer).
+#   To run on a real IBM QPU instead, replace BACKEND below, e.g.:
+#       from qiskit_ibm_runtime import QiskitRuntimeService
+#       BACKEND = QiskitRuntimeService().backend("ibm_torino")
+#   (execution then routes through the SamplerV2 primitive automatically).
+BACKEND = AerSimulator() if HAVE_AER else "statevector"
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ONE self-contained CSV (Open, High, Low, Close_prev_1..n, target):
@@ -176,10 +186,23 @@ class QuantumReservoir:
 
         # use the BACKEND chosen at the top of the file (simulator or real QPU)
         self.sim = backend if backend is not None else BACKEND
-        if self.noise and isinstance(self.sim, AerSimulator):
-            self.sim.set_options(noise_model=build_noise_model())
+        self._statevector = isinstance(self.sim, str) and self.sim == "statevector"
+        self._sample_rng = np.random.default_rng(seed + 12345)  # for statevector sampling
+
+        if self._statevector:
+            self.backend_name = "statevector (base qiskit)"
+        elif HAVE_AER and isinstance(self.sim, AerSimulator):
+            self.backend_name = "AerSimulator"
+        else:
+            self.backend_name = type(self.sim).__name__
+
+        if self.noise:
+            if HAVE_AER and isinstance(self.sim, AerSimulator):
+                self.sim.set_options(noise_model=build_noise_model())
+            else:
+                print("[qrc] note: NOISE=True ignored — needs an Aer simulator backend")
         # NOTE: on real IBM hardware, backend.run is deprecated — execution there
-        # should go through the SamplerV2 primitive (transpile stays the same).
+        # routes through the SamplerV2 primitive (transpile stays the same).
 
     @property
     def output_dim(self) -> int:
@@ -231,11 +254,25 @@ class QuantumReservoir:
           * real IBM QPU/runtime → SamplerV2 primitive        (backend.run is
                                                                 deprecated there)
         """
-        if isinstance(self.sim, AerSimulator):
+        # ① base-qiskit statevector fallback (no qiskit-aer / no QPU required)
+        if self._statevector:
+            from qiskit.quantum_info import Statevector
+            out = []
+            for c in tqc:
+                cc = c.remove_final_measurements(inplace=False)   # drop measure for SV
+                probs = Statevector.from_instruction(cc).probabilities()
+                idx = self._sample_rng.choice(len(probs), size=self.shots, p=probs)
+                vals, cnts = np.unique(idx, return_counts=True)
+                nq = cc.num_qubits
+                out.append({format(int(v), f"0{nq}b"): int(k) for v, k in zip(vals, cnts)})
+            return out
+
+        # ② local Aer simulator
+        if HAVE_AER and isinstance(self.sim, AerSimulator):
             result = self.sim.run(tqc, shots=self.shots).result()
             return [result.get_counts(i) for i in range(len(tqc))]
 
-        # real hardware / Qiskit Runtime → SamplerV2 (imported lazily)
+        # ③ real hardware / Qiskit Runtime → SamplerV2 (imported lazily)
         from qiskit_ibm_runtime import SamplerV2
         sampler = SamplerV2(mode=self.sim)
         job = sampler.run([(c,) for c in tqc], shots=self.shots)
@@ -269,13 +306,15 @@ class QuantumReservoir:
         if verbose:
             print(f"[qrc] evolving {n} windows  "
                   f"({self.n_qubits} qubits, window={self.window}, "
-                  f"shots={self.shots}, noise={'ON' if self.noise else 'OFF'})")
+                  f"shots={self.shots}, backend={self.backend_name}, "
+                  f"noise={'ON' if self.noise else 'OFF'})")
         t0 = time.time()
 
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             circuits = [self.build_circuit(windows[t]) for t in range(start, end)]
-            tqc = transpile(circuits, self.sim, optimization_level=1)
+            # statevector fallback handles native gates directly — no transpile needed
+            tqc = circuits if self._statevector else transpile(circuits, self.sim, optimization_level=1)
             batch_counts = self._run_counts(tqc)
             for i in range(end - start):
                 feats[start + i] = self._counts_to_features(batch_counts[i])
