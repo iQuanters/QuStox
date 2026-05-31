@@ -1,19 +1,22 @@
 """
-SVR readout + trading-signal logic.
+Read-out models + trading-signal logic.
 
-The reservoir is fixed; only this readout is trained. It is a regression task:
-the SVR predicts the next-bar return, from which we reconstruct the implied
-next price and derive a buy/sell signal and a 0–100 confidence.
+The reservoir is fixed; only the read-out is trained. Two read-outs are
+available, both regressing the next-bar return:
+
+  * SVRReadout : RBF Support-Vector Regression.
+  * NNReadout  : a 2-layer neural network [n_features, 6, 1] (sklearn MLP).
 
 Target scaling
 --------------
-Bar-to-bar returns are tiny (~1e-3). A raw SVR with epsilon=0.1 would predict
-~0 everywhere, so we standardize BOTH the features and the target
-(TransformedTargetRegressor) — epsilon then acts in units of target std.
+Bar-to-bar returns are tiny (~1e-3). A raw model with default tolerances would
+predict ~0 everywhere, so we standardize BOTH the features and the target
+(TransformedTargetRegressor) for every read-out.
 """
 
 import numpy as np
 from sklearn.svm import SVR
+from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import TransformedTargetRegressor
@@ -32,6 +35,50 @@ class SVRReadout:
         )
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "SVRReadout":
+        self.model.fit(X, y)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predicted next-bar return."""
+        return self.model.predict(X)
+
+
+class NNReadout:
+    """
+    2-layer neural-network read-out: [n_features, 6, 1].
+
+    Layer 1: n_features → 6  (ReLU)
+    Layer 2: 6 → 1           (linear)
+
+    With the reservoir's 40 features this is exactly the requested [40, 6, 1].
+    Features and target are standardized (returns are ~1e-3).
+    """
+
+    def __init__(
+        self,
+        hidden: int = 6,
+        alpha: float = 1e-3,
+        max_iter: int = 3000,
+        seed: int = 42,
+    ):
+        self.model = TransformedTargetRegressor(
+            regressor=make_pipeline(
+                StandardScaler(),
+                MLPRegressor(
+                    hidden_layer_sizes=(hidden,),
+                    activation="relu",
+                    solver="adam",
+                    alpha=alpha,
+                    max_iter=max_iter,
+                    early_stopping=True,
+                    n_iter_no_change=40,
+                    random_state=seed,
+                ),
+            ),
+            transformer=StandardScaler(),
+        )
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "NNReadout":
         self.model.fit(X, y)
         return self
 
