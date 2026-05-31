@@ -122,14 +122,14 @@ def analyze_sentiment(ctx: MarketContext) -> SentimentResult:
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _build_prompt(ctx: MarketContext) -> str:
-    """Format VIX + headlines into the user message sent to Claude."""
+    """Format VIX + headlines into the user message sent to OpenAI."""
     # VIX context block
     vix_block = (
         f"VIX: {ctx.vix_current:.1f}  "
         f"(percentile={ctx.vix_percentile:.0f}%, trend={ctx.vix_trend})"
     )
 
-    # Regime hints from VIX level alone (help Claude anchor quickly)
+    # Regime hints from VIX level alone (help the model anchor quickly)
     if   ctx.vix_current < 15:  vix_hint = "VIX below 15 → lean toward CALM."
     elif ctx.vix_current < 25:  vix_hint = "VIX 15–25 → lean toward NORMAL or event-specific regime."
     elif ctx.vix_current < 35:  vix_hint = "VIX 25–35 → lean toward ELEVATED or event-specific regime."
@@ -190,11 +190,11 @@ def _date_event_hint(dt) -> str:
 
 def _parse_response(raw: str, ctx: MarketContext) -> SentimentResult:
     """
-    Parse Claude's JSON response into a SentimentResult.
+    Parse OpenAI's JSON response into a SentimentResult.
 
     Strips code fences if present, validates regime label, clamps score.
     """
-    # Strip markdown code fences if Claude wraps JSON in them
+    # Strip markdown code fences if the model wraps JSON in them
     text = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
 
     try:

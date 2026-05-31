@@ -125,8 +125,8 @@ def print_dashboard(ticker: str, factors: ExternalFactors) -> None:
     print(f"╠{line}╣")
     print(f"║  VIX        {factors.vix_current:>6.1f}   "
           f"trend={factors.vix_trend:<8}              ║")
-    print(f"║  Headlines  {factors.headlines_used:>6}   analysed by Claude"
-          f"                ║")
+    print(f"║  Headlines  {factors.headlines_used:>6}   analysed by AI"
+          f"                    ║")
     print(f"╠{line}╣")
     print(f"║  REGIME       {factors.regime:<20}             ║")
     print(f"║  MULTIPLIER   {factors.window_multiplier:<6.2f}×"

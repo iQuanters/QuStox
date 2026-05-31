@@ -47,7 +47,7 @@ class ExternalFactors:
                         < 1.0 → compress windows (uncertain market)
                         > 1.0 → expand windows (stable market)
     sentiment_score   : −1.0 (very bearish) → +1.0 (very bullish)
-    reasoning         : one-sentence explanation from Claude
+    reasoning         : one-sentence explanation from OpenAI
     vix_current       : latest VIX close
     vix_trend         : "RISING" | "FALLING" | "STABLE"
     headlines_used    : number of headlines analysed
@@ -110,9 +110,9 @@ def get_external_factors(
               f"(p{ctx.vix_percentile:.0f}, {ctx.vix_trend})")
         print(f"   News : {len(ctx.headlines)} headlines")
 
-    # Step 2 — classify with Claude
+    # Step 2 — classify with OpenAI
     if verbose:
-        print("   Classifying regime via Claude …")
+        print("   Classifying regime via OpenAI …")
     sentiment: SentimentResult = analyze_sentiment(ctx)
 
     if verbose:
