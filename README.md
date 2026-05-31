@@ -23,3 +23,7 @@ Outputs are stored under the `dataset/{TICKER}/` folder:
 * **Raw Files** (`dataset/{TICKER}/raw/`): Original Yahoo Finance data in standard OHLCV format (`5m`, `10m`, `30m`, `1h`, `1d`).
 * **Processed Schema** (`dataset/{TICKER}/`): Lag-enriched datasets (`10m`, `30m`, `1d`) formatted with columns:
   `start_ts`, `end_ts`, `interval`, `Open`, `High`, `Low`, `Close`, and lagged closing prices (`Close_prev_1` to `Close_prev_N`).
+
+## Pre-loaded Datasets
+
+This repository includes pre-downloaded historical data for `SPY`, `AAPL`, `GOOG`, `CVX`, and `OXY`. To learn how to manage local changes, add new stock tickers, or remove existing ones, check the [Stock Datasets Guide](DATASETS.md).
