@@ -22,11 +22,11 @@ confidence gate and position-size multiplier:
 
 Usage
 -----
-    python infer_pipeline.py "2026-03-05 06:30"
-    python infer_pipeline.py 2026-03-05
-    python infer_pipeline.py "2026-03-05 09:30" "2026-03-05 10:30"
-    python infer_pipeline.py 2026-03-05 --no-sentiment
-    python infer_pipeline.py 2026-03-05 --ticker SPY   # sentiment for SPY
+    python infer_pipeline.py                       # most recent bar in dataset
+    python infer_pipeline.py 2026-04-30            # last bar of that day (market close)
+    python infer_pipeline.py "2026-04-30 09:30"    # bar nearest that exact time
+    python infer_pipeline.py 2026-04-30 --no-sentiment
+    python infer_pipeline.py 2026-04-30 --ticker AAPL
 """
 
 from __future__ import annotations
@@ -197,23 +197,33 @@ def load_dataset(path: str):
 
 
 def select_rows(df, ts_wall, when: list[str], index: list[int] | None) -> np.ndarray:
+    """Always returns exactly ONE row — the single bar to predict on."""
     n = len(df)
+
+    # explicit row index
     if index is not None:
-        idx = [i if i >= 0 else n + i for i in index]
-        return np.array(sorted(set(idx)))
+        i = index[0] if index[0] >= 0 else n + index[0]
+        return np.array([i])
+
+    # no argument → most recent bar in dataset
     if ts_wall is None or not when:
-        return np.array([n - 1])   # default: last row
-    if len(when) == 2:
-        lo, hi = pd.to_datetime(when[0]), pd.to_datetime(when[1])
-        mask = (ts_wall >= lo) & (ts_wall <= hi)
-        return np.where(mask.to_numpy())[0]
+        return np.array([n - 1])
+
     s = when[0]
     has_time = (":" in s) or len(s.strip()) > 10
-    if not has_time:
+
+    if has_time:
+        # exact timestamp → nearest bar
+        target = pd.to_datetime(s)
+        i = int((ts_wall - target).abs().values.argmin())
+    else:
+        # date only → last bar of that day (market close)
         day = pd.to_datetime(s).date()
-        return np.where((ts_wall.dt.date == day).to_numpy())[0]
-    target = pd.to_datetime(s)
-    i = int((ts_wall - target).abs().values.argmin())
+        day_idx = np.where((ts_wall.dt.date == day).to_numpy())[0]
+        if len(day_idx) == 0:
+            raise SystemExit(f"[select] no bars found on {day}")
+        i = int(day_idx[-1])   # last bar = market close
+
     return np.array([i])
 
 
