@@ -41,21 +41,21 @@ def main():
     print(f"\nProcessing intraday data for {ticker} (10-minute and 30-minute)...")
     
     # Fetch 5m data (used for both 10m and 30m resampling)
-    df_5m = get_data(period="60d", interval="5m", filename=f"{ticker}_raw_5m.csv", prepost=True)
+    df_5m = get_data(period="60d", interval="5m", filename=f"{ticker}_5m.csv", prepost=True)
     if df_5m.empty:
         print(f"Error: No 5m data found for ticker {ticker}. Please check the symbol and try again.")
         return
         
     # 10-Minute Data (resample from 5m)
     df_10m = df_5m.resample("10min").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    df_10m.to_csv(os.path.join(raw_dir, f"{ticker}_10min_local.csv"))
+    df_10m.to_csv(os.path.join(raw_dir, f"{ticker}_10m.csv"))
     
     # 30-Minute Data (resample from 5m)
     df_30m = df_5m.resample("30min").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    df_30m.to_csv(os.path.join(raw_dir, f"{ticker}_30min_local.csv"))
+    df_30m.to_csv(os.path.join(raw_dir, f"{ticker}_30m.csv"))
     
     # Download raw 1h data (no aggregation required, just keep the raw file)
-    df_1h = get_data(period="60d", interval="1h", filename=f"{ticker}_raw_1h.csv", prepost=True)
+    df_1h = get_data(period="60d", interval="1h", filename=f"{ticker}_1h.csv", prepost=True)
     if df_1h.empty:
         print(f"Error: No 1h data found for ticker {ticker}.")
         return
@@ -65,14 +65,11 @@ def main():
     # ==========================================
     print(f"\nProcessing 1-day daily data for {ticker}...")
     
-    # Download max historical daily data
-    df_1d = get_data(period="max", interval="1d", filename=f"{ticker}_raw_1d.csv", prepost=False)
+    # Download max historical daily data (saves directly as {ticker}_1d.csv)
+    df_1d = get_data(period="max", interval="1d", filename=f"{ticker}_1d.csv", prepost=False)
     if df_1d.empty:
         print(f"Error: No daily data found for ticker {ticker}.")
         return
-    
-    # Save the 1d data directly as the local output
-    df_1d.to_csv(os.path.join(raw_dir, f"{ticker}_1d_local.csv"))
     
     print(f"\nAll datasets for {ticker} processed and saved in {raw_dir}!")
 
